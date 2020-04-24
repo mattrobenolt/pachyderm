@@ -9859,7 +9859,7 @@ func TestSpout(t *testing.T) {
 		t.Skip("Skipping integration tests in short mode")
 	}
 	c := tu.GetPachClient(t)
-	require.NoError(t, c.DeleteAll())
+
 	t.Run("SpoutBasic", func(t *testing.T) {
 		dataRepo := tu.UniqueString("TestSpoutBasic_data")
 		require.NoError(t, c.CreateRepo(dataRepo))
@@ -9924,6 +9924,15 @@ func TestSpout(t *testing.T) {
 		jobInfos, err := c.FlushJobAll([]*pfs.Commit{client.NewCommit(pipeline, "master")}, []string{downstreamPipeline})
 		require.NoError(t, err)
 		require.Equal(t, 1, len(jobInfos))
+
+		// finally, let's make sure that the provenance is in a consistent state after running the spout test
+		require.NoError(t, c.Fsck(false, func(resp *pfs.FsckResponse) error {
+			if resp.Error != "" {
+				return errors.New(resp.Error)
+			}
+			return nil
+		}))
+		require.NoError(t, c.DeleteAll())
 	})
 
 	t.Run("SpoutOverwrite", func(t *testing.T) {
@@ -9970,6 +9979,14 @@ func TestSpout(t *testing.T) {
 			}
 			prevLength = fileLength
 		}
+		// finally, let's make sure that the provenance is in a consistent state after running the spout test
+		require.NoError(t, c.Fsck(false, func(resp *pfs.FsckResponse) error {
+			if resp.Error != "" {
+				return errors.New(resp.Error)
+			}
+			return nil
+		}))
+		require.NoError(t, c.DeleteAll())
 	})
 	t.Run("SpoutProvenance", func(t *testing.T) {
 		dataRepo := tu.UniqueString("TestSpoutProvenance_data")
@@ -10061,6 +10078,14 @@ func TestSpout(t *testing.T) {
 				require.Equal(t, provenanceID, provenance.ID)
 			}
 		}
+		// finally, let's make sure that the provenance is in a consistent state after running the spout test
+		require.NoError(t, c.Fsck(false, func(resp *pfs.FsckResponse) error {
+			if resp.Error != "" {
+				return errors.New(resp.Error)
+			}
+			return nil
+		}))
+		require.NoError(t, c.DeleteAll())
 	})
 	t.Run("ServiceSpout", func(t *testing.T) {
 		dataRepo := tu.UniqueString("TestServiceSpout_data")
@@ -10151,6 +10176,15 @@ func TestSpout(t *testing.T) {
 		err = c.GetFile(pipeline, commitInfo.Commit.ID, files[0].File.Path, 0, 0, &buf)
 		require.NoError(t, err)
 		require.Equal(t, buf.String(), "foo")
+
+		// finally, let's make sure that the provenance is in a consistent state after running the spout test
+		require.NoError(t, c.Fsck(false, func(resp *pfs.FsckResponse) error {
+			if resp.Error != "" {
+				return errors.New(resp.Error)
+			}
+			return nil
+		}))
+		require.NoError(t, c.DeleteAll())
 	})
 
 	t.Run("SpoutMarker", func(t *testing.T) {
@@ -10326,6 +10360,14 @@ func TestSpout(t *testing.T) {
 				t.Errorf("line did not have the expected form %v, '%v'", len(line), line)
 			}
 		}
+		// finally, let's make sure that the provenance is in a consistent state after running the spout test
+		require.NoError(t, c.Fsck(false, func(resp *pfs.FsckResponse) error {
+			if resp.Error != "" {
+				return errors.New(resp.Error)
+			}
+			return nil
+		}))
+		require.NoError(t, c.DeleteAll())
 	})
 
 	t.Run("SpoutInputValidation", func(t *testing.T) {
@@ -10353,6 +10395,14 @@ func TestSpout(t *testing.T) {
 				},
 			})
 		require.YesError(t, err)
+		// finally, let's make sure that the provenance is in a consistent state after running the spout test
+		require.NoError(t, c.Fsck(false, func(resp *pfs.FsckResponse) error {
+			if resp.Error != "" {
+				return errors.New(resp.Error)
+			}
+			return nil
+		}))
+		require.NoError(t, c.DeleteAll())
 	})
 
 	t.Run("SpoutRapidOpenClose", func(t *testing.T) {
@@ -10390,16 +10440,16 @@ func TestSpout(t *testing.T) {
 			}
 		}
 
+		// finally, let's make sure that the provenance is in a consistent state after running the spout test
+		require.NoError(t, c.Fsck(false, func(resp *pfs.FsckResponse) error {
+			if resp.Error != "" {
+				return errors.New(resp.Error)
+			}
+			return nil
+		}))
 		require.NoError(t, c.DeleteAll())
 	})
 
-	// finally, let's make sure that the provenance is in a consistent state after running all of the spout tests
-	require.NoError(t, c.Fsck(false, func(resp *pfs.FsckResponse) error {
-		if resp.Error != "" {
-			return errors.New(resp.Error)
-		}
-		return nil
-	}))
 }
 
 func TestKafka(t *testing.T) {
