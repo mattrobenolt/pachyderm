@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"io/ioutil"
 
 	units "github.com/docker/go-units"
 	"github.com/pachyderm/pachyderm/src/client"
@@ -35,6 +36,7 @@ type loadConfig struct {
 func newLoadConfig(opts ...loadConfigOption) *loadConfig {
 	config := &loadConfig{}
 	config.pachdConfig = newPachdConfig()
+	config.pachdConfig.StorageCompactionMaxFanIn = 10
 	for _, opt := range opts {
 		opt(config)
 	}
@@ -486,7 +488,7 @@ func TestLoad(t *testing.T) {
 	// able to deploy the new storage layer in CI (particularly postgres), I have decided
 	// to just ignore the error that will be produced by running TestLoad without postgres
 	// setup for the time being.
-	testLoad(fuzzLoad())
+	require.NoError(t, testLoad(fuzzLoad()))
 }
 
 func fuzzLoad() *loadConfig {
@@ -704,4 +706,60 @@ func TestListFileV2(t *testing.T) {
 		return nil
 	}, config)
 	require.NoError(t, err)
+}
+
+func TestCompaction(t *testing.T) {
+	// t.SkipNow()
+	config := &serviceenv.PachdFullConfiguration{}
+	config.NewStorageLayer = true
+	config.StorageCompactionMaxFanIn = 1000
+	err := testpachd.WithRealEnv(func(env *testpachd.RealEnv) error {
+		repo := "test"
+		require.NoError(t, env.PachClient.CreateRepo(repo))
+		commit1, err := env.PachClient.StartCommit(repo, "master")
+		require.NoError(t, err)
+
+		const (
+			nFileSets   = 10
+			filesPer = 10
+			fileSetSize = 1e6
+		)
+		//data := make([]byte, fileSetSize)
+		for i := 0; i < nFileSets; i++ {
+			fsSpec := fileSetSpec{}
+			for j := 0; j < filesPer; j++ {
+				data, err := ioutil.ReadAll(randomReader(fileSetSize))
+				if err != nil {
+					return err
+				}
+
+				fsSpec[fmt.Sprintf("file%02d", j)] = data
+			}
+			if err := env.PachClient.PutTar(repo, commit1.ID, fsSpec.makeTarStream()); err != nil {
+				return err
+			}
+		}
+		if err := env.PachClient.FinishCommit(repo, commit1.ID); err != nil {
+			return err
+		}
+		return err
+	}, config)
+	require.NoError(t, err)
+}
+
+var (
+	randSeed = int64(0)
+	randMu   sync.Mutex
+)
+
+func getRand() *rand.Rand {
+	randMu.Lock()
+	seed := randSeed
+	randSeed++
+	randMu.Unlock()
+	return rand.New(rand.NewSource(seed))
+}
+
+func randomReader(n int) io.Reader {
+	return io.LimitReader(getRand(), int64(n))
 }

@@ -239,6 +239,10 @@ func (s *Storage) Delete(ctx context.Context, fileSet string) error {
 
 // WalkFileSet calls f with the path of every primitive fileSet under prefix.
 func (s *Storage) WalkFileSet(ctx context.Context, prefix string, f func(string) error) error {
+	yes := s.objC.Exists(ctx, prefix)
+	if yes {
+		return f(prefix)
+	}
 	return s.objC.Walk(ctx, prefix, f)
 }
 

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+	"fmt"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/gogo/protobuf/types"
@@ -68,7 +69,7 @@ func (d *driver) finishCommitNewStorageLayer(txnCtx *txnenv.TransactionContext, 
 			return err
 		}
 		// Compact the commit changes into a diff file set.
-		if err := d.compact(context.Background(), m, path.Join(commitPath, fileset.Diff), []string{commitPath}); err != nil {
+		if err := d.compact(m, path.Join(commitPath, fileset.Diff), []string{commitPath}); err != nil {
 			return err
 		}
 		// Compact the commit changes (diff file set) into the total changes in the commit's ancestry.
@@ -82,7 +83,7 @@ func (d *driver) finishCommitNewStorageLayer(txnCtx *txnenv.TransactionContext, 
 		if err != nil {
 			return err
 		}
-		if err := d.compact(context.Background(), m, compactSpec.Output, compactSpec.Input); err != nil {
+		if err := d.compact(m, compactSpec.Output, compactSpec.Input); err != nil {
 			return err
 		}
 		// (bryce) need size.
@@ -118,7 +119,7 @@ func (d *driver) withFileSet(ctx context.Context, repo, commit string, f func(*f
 		return err
 	}
 	return d.compactionQueue.RunTaskBlock(ctx, func(m *work.Master) error {
-		return d.compact(ctx, m, subFileSetPath, []string{path.Join(tmpPrefix, subFileSetPath)})
+		return d.compact(m, subFileSetPath, []string{path.Join(tmpPrefix, subFileSetPath)})
 	})
 }
 
@@ -299,8 +300,9 @@ func (fr *FileReader) drain() error {
 	return nil
 }
 
-// compact is the entrypoint to compaction.
-func (d *driver) compact(ctx context.Context, master *work.Master, outputPath string, inputPrefixes []string) error {
+func (d *driver) compact(master *work.Master, outputPath string, inputPrefixes []string) error {
+	fmt.Println("compact", outputPath, inputPrefixes)
+	ctx := master.Ctx()
 	// resolve prefixes into paths
 	inputPaths := []string{}
 	for _, inputPrefix := range inputPrefixes {
@@ -312,10 +314,7 @@ func (d *driver) compact(ctx context.Context, master *work.Master, outputPath st
 			return err
 		}
 	}
-	if d.env.StorageCompactionMaxFanIn < 2 {
-		panic("StorageCompactionMaxFanIn cannot be < 2")
-	}
-	return d.compactIter(ctx, compactParams{
+	return d.compactIter(ctx, compactSpec{
 		master:     master,
 		inputPaths: inputPaths,
 		outputPath: outputPath,
@@ -323,7 +322,7 @@ func (d *driver) compact(ctx context.Context, master *work.Master, outputPath st
 	})
 }
 
-type compactParams struct {
+type compactSpec struct {
 	master     *work.Master
 	outputPath string
 	inputPaths []string
@@ -332,52 +331,52 @@ type compactParams struct {
 
 // compactIter is one level of compaction.  It will only perform compaction
 // if len(inputPaths) < params.maxFanIn otherwise it will split inputPaths recursively.
-func (d *driver) compactIter(ctx context.Context, params compactParams) (retErr error) {
+func (d *driver) compactIter(ctx context.Context, params compactSpec) (retErr error) {
+	fmt.Println("compactIter", params.inputPaths)
+	// within maxFanIn
+	if len(params.inputPaths) <= params.maxFanIn {
+		return d.shardedCompact(ctx, params.master, params.outputPath, params.inputPaths)
+	}
+	// exceeds maxFanIn, need to divide up
 	scratch := path.Join(tmpPrefix, uuid.NewWithoutDashes())
 	defer func() {
 		if err := d.storage.Delete(ctx, scratch); retErr == nil {
 			retErr = err
 		}
 	}()
-	// exceeds maxFanIn need to branch out
-	inputPaths := params.inputPaths
-	if len(inputPaths) > params.maxFanIn {
-		childOutputPaths := []string{}
-		childSize := len(params.inputPaths) / params.maxFanIn
-		if len(params.inputPaths)%params.maxFanIn != 0 {
-			childSize++
-		}
-		group, ctx := errgroup.WithContext(ctx)
-		for i := 0; i < params.maxFanIn; i++ {
-			start := i * childSize
-			end := (i + 1) * childSize
-			if end > len(inputPaths) {
-				end = len(inputPaths)
-			}
-			childOutputPath := path.Join(scratch, strconv.Itoa(i))
-			childOutputPaths = append(childOutputPaths, childOutputPath)
-			group.Go(func() error {
-				return d.compactIter(ctx, compactParams{
-					master:     params.master,
-					inputPaths: inputPaths[start:end],
-					outputPath: childOutputPath,
-					maxFanIn:   params.maxFanIn,
-				})
-			})
-		}
-		if err := group.Wait(); err != nil {
-			return err
-		}
-		inputPaths = childOutputPaths
+	childOutputPaths := []string{}
+	childSize := len(params.inputPaths) / params.maxFanIn
+	if len(params.inputPaths)%params.maxFanIn != 0 {
+		childSize++
 	}
-	// within maxFanIn, generate compaction tasks for workers
-	return d.shardedCompact(ctx, params.master, params.outputPath, inputPaths)
+	eg, ctx := errgroup.WithContext(ctx)
+	for i := 0; i < params.maxFanIn; i++ {
+		start := i * childSize
+		end := (i + 1) * childSize
+		if end > len(params.inputPaths) {
+			end = len(params.inputPaths)
+		}
+		childOutputPath := path.Join(scratch, strconv.Itoa(i))
+		childOutputPaths = append(childOutputPaths, childOutputPath)
+		eg.Go(func() error {
+			return d.compactIter(ctx, compactSpec{
+				master:     params.master,
+				inputPaths: params.inputPaths[start:end],
+				outputPath: childOutputPath,
+				maxFanIn:   params.maxFanIn,
+			})
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+	return d.shardedCompact(ctx, params.master, params.outputPath, childOutputPaths)
 }
 
 // shardedCompact generates shards for the fileset(s) in inputPaths,
-// gives those shards to workers, and waits for them to complete
-// fan-in: spatially, and temporally to each shard will be len(inputPaths)
-// the shards are then serially concatenated, fan-in here is spatially the number of shards.
+// gives those shards to workers, and waits for them to complete.
+// Fan in is bound by len(inputPaths), concatenating shards have
+// fan in of one because they are concatenated sequentially.
 func (d *driver) shardedCompact(ctx context.Context, master *work.Master, outputPath string, inputPaths []string) (retErr error) {
 	scratch := path.Join(tmpPrefix, uuid.NewWithoutDashes())
 	defer func() {

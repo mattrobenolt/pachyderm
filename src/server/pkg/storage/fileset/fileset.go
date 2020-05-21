@@ -6,6 +6,7 @@ import (
 	"io"
 	"path"
 	"sort"
+	"fmt"
 
 	"github.com/pachyderm/pachyderm/src/server/pkg/storage/fileset/index"
 	"github.com/pachyderm/pachyderm/src/server/pkg/storage/fileset/tar"
@@ -135,6 +136,8 @@ func (f *FileSet) serialize() error {
 	}
 	sort.Strings(names)
 	// Serialize file set.
+	fmt.Println("fileset.serialize", path.Join(f.name, SubFileSetStr(f.subFileSet)))
+	fmt.Println("fileset.serialize", len(names))
 	w := f.storage.newWriter(f.ctx, path.Join(f.name, SubFileSetStr(f.subFileSet)))
 	for _, name := range names {
 		mfs := f.fs[name]
