@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strconv"
 	"time"
-	"fmt"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/gogo/protobuf/types"
@@ -301,7 +300,6 @@ func (fr *FileReader) drain() error {
 }
 
 func (d *driver) compact(master *work.Master, outputPath string, inputPrefixes []string) error {
-	fmt.Println("compact", outputPath, inputPrefixes)
 	ctx := master.Ctx()
 	// resolve prefixes into paths
 	inputPaths := []string{}
@@ -332,7 +330,6 @@ type compactSpec struct {
 // compactIter is one level of compaction.  It will only perform compaction
 // if len(inputPaths) < params.maxFanIn otherwise it will split inputPaths recursively.
 func (d *driver) compactIter(ctx context.Context, params compactSpec) (retErr error) {
-	fmt.Println("compactIter", params.inputPaths)
 	// within maxFanIn
 	if len(params.inputPaths) <= params.maxFanIn {
 		return d.shardedCompact(ctx, params.master, params.outputPath, params.inputPaths)
@@ -349,7 +346,7 @@ func (d *driver) compactIter(ctx context.Context, params compactSpec) (retErr er
 	if len(params.inputPaths)%params.maxFanIn != 0 {
 		childSize++
 	}
-	eg, ctx := errgroup.WithContext(ctx)
+	eg, childCtx := errgroup.WithContext(ctx)
 	for i := 0; i < params.maxFanIn; i++ {
 		start := i * childSize
 		end := (i + 1) * childSize
@@ -359,7 +356,7 @@ func (d *driver) compactIter(ctx context.Context, params compactSpec) (retErr er
 		childOutputPath := path.Join(scratch, strconv.Itoa(i))
 		childOutputPaths = append(childOutputPaths, childOutputPath)
 		eg.Go(func() error {
-			return d.compactIter(ctx, compactSpec{
+			return d.compactIter(childCtx, compactSpec{
 				master:     params.master,
 				inputPaths: params.inputPaths[start:end],
 				outputPath: childOutputPath,
@@ -386,10 +383,8 @@ func (d *driver) shardedCompact(ctx context.Context, master *work.Master, output
 	}()
 	compaction := &pfs.Compaction{InputPrefixes: inputPaths}
 	var subtasks []*work.Task
-	var shardOutputs []string
 	if err := d.storage.Shard(ctx, inputPaths, func(pathRange *index.PathRange) error {
 		shardOutputPath := path.Join(scratch, strconv.Itoa(len(subtasks)))
-		shardOutputs = append(shardOutputs, shardOutputPath)
 		shard, err := serializeShard(&pfs.Shard{
 			Compaction: compaction,
 			Range: &pfs.PathRange{
@@ -410,6 +405,14 @@ func (d *driver) shardedCompact(ctx context.Context, master *work.Master, output
 		if taskInfo.State == work.State_FAILURE {
 			return errors.Errorf(taskInfo.Reason)
 		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	var shardOutputs []string
+	if err := d.storage.WalkFileSet(ctx, scratch, func(p string) error {
+		shardOutputs = append(shardOutputs, p)
 		return nil
 	}); err != nil {
 		return err

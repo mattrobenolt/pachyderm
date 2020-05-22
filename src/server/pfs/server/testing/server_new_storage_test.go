@@ -5,14 +5,15 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math/rand"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
-	"io/ioutil"
 
 	units "github.com/docker/go-units"
 	"github.com/pachyderm/pachyderm/src/client"
@@ -36,7 +37,7 @@ type loadConfig struct {
 func newLoadConfig(opts ...loadConfigOption) *loadConfig {
 	config := &loadConfig{}
 	config.pachdConfig = newPachdConfig()
-	config.pachdConfig.StorageCompactionMaxFanIn = 10
+	config.pachdConfig.StorageCompactionMaxFanIn = 2
 	for _, opt := range opts {
 		opt(config)
 	}
@@ -483,11 +484,15 @@ func seedRand(customSeed ...int64) {
 }
 
 func TestLoad(t *testing.T) {
-	seedRand()
-	// (bryce) this is so dumb, but through a combination of the linter and not being
+	// TODO this is so dumb, but through a combination of the linter and not being
 	// able to deploy the new storage layer in CI (particularly postgres), I have decided
 	// to just ignore the error that will be produced by running TestLoad without postgres
 	// setup for the time being.
+	if os.Getenv("CI") == "true" {
+		t.SkipNow()
+	}
+	seedRand()
+
 	require.NoError(t, testLoad(fuzzLoad()))
 }
 
@@ -709,10 +714,12 @@ func TestListFileV2(t *testing.T) {
 }
 
 func TestCompaction(t *testing.T) {
-	// t.SkipNow()
+	if os.Getenv("CI") == "true" {
+		t.SkipNow()
+	}
 	config := &serviceenv.PachdFullConfiguration{}
 	config.NewStorageLayer = true
-	config.StorageCompactionMaxFanIn = 1000
+	config.StorageCompactionMaxFanIn = 10
 	err := testpachd.WithRealEnv(func(env *testpachd.RealEnv) error {
 		repo := "test"
 		require.NoError(t, env.PachClient.CreateRepo(repo))
@@ -720,11 +727,10 @@ func TestCompaction(t *testing.T) {
 		require.NoError(t, err)
 
 		const (
-			nFileSets   = 10
-			filesPer = 10
+			nFileSets   = 100
+			filesPer    = 10
 			fileSetSize = 1e6
 		)
-		//data := make([]byte, fileSetSize)
 		for i := 0; i < nFileSets; i++ {
 			fsSpec := fileSetSpec{}
 			for j := 0; j < filesPer; j++ {
@@ -738,12 +744,14 @@ func TestCompaction(t *testing.T) {
 			if err := env.PachClient.PutTar(repo, commit1.ID, fsSpec.makeTarStream()); err != nil {
 				return err
 			}
+			runtime.GC()
 		}
 		if err := env.PachClient.FinishCommit(repo, commit1.ID); err != nil {
 			return err
 		}
-		return err
+		return nil
 	}, config)
+	t.Log(err)
 	require.NoError(t, err)
 }
 
